@@ -5,8 +5,11 @@ import DeviceList from './components/DeviceList.jsx';
 import DropZone from './components/DropZone.jsx';
 import TransferProgress from './components/TransferProgress.jsx';
 import TransferModal from './components/TransferModal.jsx';
+import QrStreamSender from './components/QrStreamSender.jsx';
+import QrStreamReceiver from './components/QrStreamReceiver.jsx';
 import { useSignaling } from './hooks/useSignaling.js';
 import { useP2PTransfer } from './hooks/useP2PTransfer.js';
+import { useOpticalQr } from './hooks/useOpticalQr.js';
 
 export default function App() {
   const {
@@ -26,6 +29,14 @@ export default function App() {
     cancelTransfer,
     resetTransfer,
   } = useP2PTransfer();
+
+  // Optical QR hook
+  const opticalQr = useOpticalQr();
+
+  // Primary mode: 'webrtc' (Wi-Fi P2P) or 'optical' (Kamera QR)
+  const [appMode, setAppMode] = useState('webrtc');
+  // Optical QR sub-mode: 'sender' (layar) or 'receiver' (kamera)
+  const [opticalSubMode, setOpticalSubMode] = useState('sender');
 
   // Multi-peer selection state
   const [userSelectedPeerIds, setUserSelectedPeerIds] = useState([]);
@@ -82,68 +93,127 @@ export default function App() {
         peerId={peerId}
         clientName={clientName}
         deviceType={deviceType}
+        appMode={appMode}
+        onModeChange={setAppMode}
       />
 
-      <main className="main-layout">
-        <section className="layout-col col-left">
-          <DeviceList
-            peers={peers}
-            selectedPeerIds={selectedPeerIds}
-            onTogglePeer={handleTogglePeer}
-            onSelectAll={handleSelectAll}
-            onClearSelection={handleClearSelection}
-          />
-        </section>
+      {appMode === 'webrtc' ? (
+        <main className="main-layout">
+          <section className="layout-col col-left">
+            <DeviceList
+              peers={peers}
+              selectedPeerIds={selectedPeerIds}
+              onTogglePeer={handleTogglePeer}
+              onSelectAll={handleSelectAll}
+              onClearSelection={handleClearSelection}
+            />
+          </section>
 
-        <section className="layout-col col-right">
-          {isDispatchHidden ? (
-            <div className="dispatch-hidden-banner">
-              <div className="dispatch-hidden-info">
-                <span className="dispatch-hidden-title">Mode Penerimaan Berlangsung</span>
-                <span className="dispatch-hidden-sub">
-                  Panel pengiriman file disembunyikan agar tampilan lebih ringkas
-                </span>
-              </div>
-              <button
-                type="button"
-                className="btn btn-secondary btn-reveal-dispatch"
-                onClick={() => setRevealedTransferId(transferState.transferId)}
-              >
-                <Upload size={14} />
-                <span>Kirim File</span>
-              </button>
-            </div>
-          ) : (
-            <div className="dispatch-container">
-              {isReceiving && (
-                <div className="dispatch-collapse-bar">
-                  <span className="dispatch-collapse-title">Panel Pengiriman File</span>
-                  <button
-                    type="button"
-                    className="btn-link"
-                    onClick={() => setRevealedTransferId(null)}
-                  >
-                    Sembunyikan Panel Kirim
-                  </button>
+          <section className="layout-col col-right">
+            {isDispatchHidden ? (
+              <div className="dispatch-hidden-banner">
+                <div className="dispatch-hidden-info">
+                  <span className="dispatch-hidden-title">Mode Penerimaan Berlangsung</span>
+                  <span className="dispatch-hidden-sub">
+                    Panel pengiriman file disembunyikan agar tampilan lebih ringkas
+                  </span>
                 </div>
-              )}
-              <DropZone
-                onSendBatch={sendBatch}
-                selectedPeerIds={selectedPeerIds}
-                selectedPeerNames={selectedPeerNames}
-                disabled={isTransferActive}
-              />
-            </div>
-          )}
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-reveal-dispatch"
+                  onClick={() => setRevealedTransferId(transferState.transferId)}
+                >
+                  <Upload size={14} />
+                  <span>Kirim File</span>
+                </button>
+              </div>
+            ) : (
+              <div className="dispatch-container">
+                {isReceiving && (
+                  <div className="dispatch-collapse-bar">
+                    <span className="dispatch-collapse-title">Panel Pengiriman File</span>
+                    <button
+                      type="button"
+                      className="btn-link"
+                      onClick={() => setRevealedTransferId(null)}
+                    >
+                      Sembunyikan Panel Kirim
+                    </button>
+                  </div>
+                )}
+                <DropZone
+                  onSendBatch={sendBatch}
+                  selectedPeerIds={selectedPeerIds}
+                  selectedPeerNames={selectedPeerNames}
+                  disabled={isTransferActive}
+                />
+              </div>
+            )}
 
-          <TransferProgress
-            transferState={transferState}
-            targetPeerNames={targetPeerNames}
-            onCancel={cancelTransfer}
-            onReset={resetTransfer}
-          />
-        </section>
-      </main>
+            <TransferProgress
+              transferState={transferState}
+              targetPeerNames={targetPeerNames}
+              onCancel={cancelTransfer}
+              onReset={resetTransfer}
+            />
+          </section>
+        </main>
+      ) : (
+        <main className="optical-main-layout">
+          <div className="optical-sub-nav">
+            <button
+              type="button"
+              className={`optical-nav-btn ${opticalSubMode === 'sender' ? 'active' : ''}`}
+              onClick={() => setOpticalSubMode('sender')}
+            >
+              Kirim via Layar (Sender)
+            </button>
+            <button
+              type="button"
+              className={`optical-nav-btn ${opticalSubMode === 'receiver' ? 'active' : ''}`}
+              onClick={() => setOpticalSubMode('receiver')}
+            >
+              Terima via Kamera (Receiver)
+            </button>
+          </div>
+
+          <div className="optical-content-body">
+            {opticalSubMode === 'sender' ? (
+              <QrStreamSender
+                senderMetadata={opticalQr.senderMetadata}
+                senderFps={opticalQr.senderFps}
+                setSenderFps={opticalQr.setSenderFps}
+                isSending={opticalQr.isSending}
+                isPlaying={opticalQr.isPlaying}
+                currentDroplet={opticalQr.currentDroplet}
+                totalK={opticalQr.totalK}
+                senderBlockSize={opticalQr.senderBlockSize}
+                setSenderBlockSize={opticalQr.setSenderBlockSize}
+                stageSenderFile={opticalQr.stageSenderFile}
+                stageSenderText={opticalQr.stageSenderText}
+                toggleSenderPlay={opticalQr.toggleSenderPlay}
+                resetSender={opticalQr.resetSender}
+              />
+            ) : (
+              <QrStreamReceiver
+                cameraActive={opticalQr.cameraActive}
+                cameraError={opticalQr.cameraError}
+                receiverProgress={opticalQr.receiverProgress}
+                receiverStats={opticalQr.receiverStats}
+                solvedBlockSet={opticalQr.solvedBlockSet}
+                receivedFile={opticalQr.receivedFile}
+                receivedMetadata={opticalQr.receivedMetadata}
+                isReceiveComplete={opticalQr.isReceiveComplete}
+                startScanning={opticalQr.startScanning}
+                stopScanning={opticalQr.stopScanning}
+                switchCamera={opticalQr.switchCamera}
+                resetReceiver={opticalQr.resetReceiver}
+                downloadReceivedFile={opticalQr.downloadReceivedFile}
+              />
+            )}
+          </div>
+        </main>
+      )}
 
       <TransferModal
         incomingOffer={incomingOffer}

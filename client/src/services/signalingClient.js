@@ -19,8 +19,20 @@ export class SignalingClient {
 
   getWsUrl() {
     const defaultPort = import.meta.env.VITE_SIGNALING_PORT || '3000';
+    const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
+    const host = (typeof window !== 'undefined' && window.location.host) || 'localhost:5173';
     const hostname = (typeof window !== 'undefined' && window.location.hostname) || 'localhost';
-    return import.meta.env.VITE_WS_URL || `ws://${hostname}:${defaultPort}`;
+
+    if (import.meta.env.VITE_WS_URL) {
+      return import.meta.env.VITE_WS_URL;
+    }
+
+    if (isHttps) {
+      // In HTTPS context (LAN mobile testing), route through Vite's WSS proxy to avoid mixed content
+      return `wss://${host}/ws`;
+    }
+
+    return `ws://${hostname}:${defaultPort}`;
   }
 
   connect(peerInfo = {}) {

@@ -1,7 +1,14 @@
 import React from 'react';
-import { Laptop, Smartphone } from 'lucide-react';
+import { Laptop, Smartphone, Wifi, QrCode } from 'lucide-react';
 
-export default function Header({ connectionStatus, peerId, clientName, deviceType }) {
+export default function Header({
+  connectionStatus,
+  peerId,
+  clientName,
+  deviceType,
+  appMode = 'webrtc',
+  onModeChange,
+}) {
   const isOnline = connectionStatus === 'connected';
 
   return (
@@ -10,8 +17,27 @@ export default function Header({ connectionStatus, peerId, clientName, deviceTyp
         <img src="/logo.png" alt="FlashMux Logo" className="brand-logo-img" />
         <div>
           <h1 className="brand-title">FlashMux</h1>
-          <p className="brand-subtitle">Local P2P File Transfer</p>
+          <p className="brand-subtitle">Local & Optical P2P Transfer</p>
         </div>
+      </div>
+
+      <div className="mode-selector-tabs">
+        <button
+          type="button"
+          className={`mode-tab-btn ${appMode === 'webrtc' ? 'active' : ''}`}
+          onClick={() => onModeChange && onModeChange('webrtc')}
+        >
+          <Wifi size={14} />
+          <span>Wi-Fi P2P</span>
+        </button>
+        <button
+          type="button"
+          className={`mode-tab-btn ${appMode === 'optical' ? 'active' : ''}`}
+          onClick={() => onModeChange && onModeChange('optical')}
+        >
+          <QrCode size={14} />
+          <span>Kamera QR</span>
+        </button>
       </div>
 
       <div className="header-meta">
@@ -35,3 +61,4 @@ export default function Header({ connectionStatus, peerId, clientName, deviceTyp
     </header>
   );
 }
+

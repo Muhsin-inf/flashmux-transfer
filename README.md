@@ -17,7 +17,7 @@
 - **Multi-Device Broadcast**: Select single or multiple target devices on your LAN to stream files concurrently.
 - **4x Parallel WebRTC DataChannels (IDM-Style Streaming)**: Files are partitioned into independent segment ranges with dynamic work-stealing across 4 parallel data channels, governed by strict backpressure control (`bufferedamountlow`).
 - **Continuous Transfer Support**: Receivers can immediately accept new incoming transfer offers without needing to manually close or dismiss previous completed transfer screens.
-- **Mobile-Optimized UX (Anti-UI-Slop)**: Automatically collapses the dispatch card when receiving files to focus on live progress telemetry, with a one-tap "Kirim File" toggle to unhide the file picker whenever needed.
+- **Optical QR Stream (100% Air-Gapped / Camera)**: Transfer files and text optically from sender screen to receiver camera without Wi-Fi, Bluetooth, or local network connection. Powered by **Fountain Codes (Luby Transform)** and **pako zlib compression**, allowing the receiver camera to reconstruct the full file regardless of dropped frames or scanning order.
 - **Memory-Safe Streaming & Incremental Hash**: 64 KB chunking via `File.slice()`, streaming writes to disk via FileSystem Access API (desktop) or blob chunking (mobile), and per-chunk incremental MD5 verification compatible with HTTP local IP environments.
 
 ---
@@ -91,19 +91,23 @@ local-p2p-transfer/
     │   └── manifest.json      # PWA manifest for mobile devices
     └── src/
         ├── components/
-        │   ├── Header.jsx           # App header with logo, connection status & local peer ID
+        │   ├── Header.jsx           # App header with logo, mode switcher & local peer ID
         │   ├── DeviceList.jsx       # Multi-peer selection grid with device type icons
         │   ├── DropZone.jsx         # Multi-file & folder staging with category summaries
         │   ├── TransferModal.jsx    # Incoming batch offer confirmation & folder picker
-        │   └── TransferProgress.jsx # Multi-channel IDM telemetry, speed, ETA & elapsed time
+        │   ├── TransferProgress.jsx # Multi-channel IDM telemetry, speed, ETA & elapsed time
+        │   ├── QrStreamSender.jsx   # Animated QR generator on canvas with speed slider
+        │   └── QrStreamReceiver.jsx # Camera viewfinder with live peeling block matrix
         ├── hooks/
         │   ├── useSignaling.js      # Presence and peer discovery lifecycle
-        │   └── useP2PTransfer.js    # WebRTC transfer state machine & multi-session support
+        │   ├── useP2PTransfer.js    # WebRTC transfer state machine & multi-session support
+        │   └── useOpticalQr.js      # Optical QR camera scanner & frame stream state
         ├── services/
         │   ├── signalingClient.js   # WebSocket signaling client & reconnection
         │   ├── webrtcEngine.js      # 4x parallel DataChannel engine & IDM segment streaming
         │   ├── fileChunker.js       # File.slice() 64 KB memory-safe chunking
-        │   └── fileWriter.js        # FileSystem Access API & mobile blob fallback
+        │   ├── fileWriter.js        # FileSystem Access API & mobile blob fallback
+        │   └── fountainQrEngine.js  # Luby Transform (Fountain Code) + pako zlib compression
         ├── utils/
         │   ├── binaryPacket.js      # 12-byte little-endian header encoder/decoder
         │   ├── fileScanner.js       # Directory tree traversal & multi-file category scanner
@@ -159,6 +163,8 @@ Default `client/.env`:
 VITE_SIGNALING_PORT=3000
 VITE_DEFAULT_CHUNK_SIZE=65536
 VITE_PARALLEL_CHANNELS=4
+VITE_QR_CHUNK_SIZE=600
+VITE_QR_DEFAULT_FPS=15
 ```
 
 ---
@@ -182,6 +188,7 @@ Vite will start at `http://<SERVER_IP>:5173`.
 
 ## Local Peer-to-Peer Testing Workflow
 
+### Mode 1: Wi-Fi P2P (WebRTC Multi-Channel)
 1. Open `http://localhost:5173` on your primary computer.
 2. Open `http://<YOUR_LOCAL_IP>:5173` on a second device (smartphone, tablet, or another computer on the same Wi-Fi/Hotspot) or in a second private browser window.
 3. Both devices will appear in each other's "Available Peers" panel with their detected device category (desktop/mobile).
@@ -191,6 +198,24 @@ Vite will start at `http://<SERVER_IP>:5173`.
 7. Click **"Accept"**. On desktop Chrome/Edge, select your destination directory. On mobile, files stream and download directly.
 8. The transfer streams across 4 parallel data channels with independent segment allocation (IDM-style), displaying live speed, total elapsed time, and per-channel segment progress.
 9. When finished, the sender can immediately dispatch another batch to the receiver without requiring the receiver to close the completion modal.
+
+### Mode 2: Kamera QR (Air-Gapped Optical Fountain Stream)
+1. In the header navigation, switch mode to **"Kamera QR"**.
+2. **Sender Device (Laptop/PC or Phone):**
+   - Click **"Kirim (QR Stream)"**.
+   - Choose **"Berkas File"** (e.g., photo, document, script) or **"Teks Langsung"** (e.g., API keys, passwords, code snippets).
+   - Click **"Siapkan QR Stream"**.
+   - Adjust FPS (6 to 24 FPS) according to receiver camera capabilities.
+   - Click **"Mulai Stream"** (supports fullscreen mode for high scanning contrast).
+3. **Receiver Device (Smartphone or Laptop with Webcam):**
+   - In the header navigation, switch mode to **"Kamera QR"**.
+   - Click **"Terima (Kamera)"**.
+   - Select your camera (back camera or front webcam) and click **"Buka Kamera & Mulai Scan"**.
+   - Point the camera at the sender screen.
+   - The scanner utilizes the high-performance native `BarcodeDetector` API (with `jsQR` fallback) to read packets.
+   - The **Block Matrix** visualizer lights up in real time as systematic droplets and XOR fountain droplets are received.
+   - Due to the **Luby Transform (Fountain Code)** algorithm, dropped frames or missed codes are automatically recovered without re-requesting.
+   - Once all $K$ source blocks are solved, the payload is decompressed via `pako` (zlib), verified with CRC32 checksum, and ready for immediate download or copy.
 
 ---
 

@@ -49,3 +49,8 @@ Thumbs.db
 .cache/
 .temp/
 .tmp/
+
+# AI Agent & Skills
+.agents/
+skills-lock.json
+
