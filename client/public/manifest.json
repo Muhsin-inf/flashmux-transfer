@@ -1,0 +1,17 @@
+{
+  "name": "FlashMux P2P Transfer",
+  "short_name": "FlashMux",
+  "description": "High-throughput local WebRTC peer-to-peer file transfer",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#121316",
+  "theme_color": "#18191E",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192 512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

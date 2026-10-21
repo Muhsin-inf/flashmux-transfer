@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "anti-ui-slop": {
+      "source": "tuanphung2005/anti-ui-slop",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "3cd99221ade7a0fb75943c392fe4fe2309f30d1b0d3be526679514e3648830f1"
+    }
+  }
+}
