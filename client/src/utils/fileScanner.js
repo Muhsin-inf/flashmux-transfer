@@ -18,12 +18,31 @@ async function readAllEntriesFromReader(dirReader) {
 }
 
 /**
+ * Checks if a file name should be ignored (system files, shortcuts, office temporary locks)
+ */
+export function isIgnoredSystemFile(fileName) {
+  if (!fileName) return false;
+  const lower = fileName.toLowerCase().trim();
+  return (
+    lower === 'desktop.ini' ||
+    lower === 'thumbs.db' ||
+    lower === '.ds_store' ||
+    lower.endsWith('.lnk') ||
+    lower.startsWith('~$')
+  );
+}
+
+/**
  * Recursively scans a FileSystemEntry (file or directory)
  */
 async function scanEntry(entry, pathPrefix = '') {
   if (!entry) return [];
 
   if (entry.isFile) {
+    if (isIgnoredSystemFile(entry.name)) {
+      console.log(`[FileScanner] Skipping restricted system file: ${entry.name}`);
+      return [];
+    }
     const file = await new Promise((resolve, reject) => {
       entry.file(resolve, reject);
     });
@@ -35,6 +54,18 @@ async function scanEntry(entry, pathPrefix = '') {
     const dirReader = entry.createReader();
     const childEntries = await readAllEntriesFromReader(dirReader);
     const newPrefix = pathPrefix ? `${pathPrefix}${entry.name}/` : `${entry.name}/`;
+
+    if (childEntries.length === 0) {
+      // Empty directory: preserve it in staged manifest so receiver creates the folder!
+      return [{
+        isDirectory: true,
+        file: null,
+        fileName: entry.name,
+        relativePath: newPrefix,
+        size: 0,
+        type: 'directory',
+      }];
+    }
 
     const nestedResults = await Promise.all(
       childEntries.map((child) => scanEntry(child, newPrefix))
@@ -66,6 +97,7 @@ export async function scanDroppedItems(dataTransfer) {
   } else if (dataTransfer.files && dataTransfer.files.length > 0) {
     for (let i = 0; i < dataTransfer.files.length; i++) {
       const file = dataTransfer.files[i];
+      if (isIgnoredSystemFile(file.name)) continue;
       const relativePath = file.webkitRelativePath || file.name;
       results.push({
         file,
@@ -88,6 +120,7 @@ export function scanFileInput(fileList) {
 
   for (let i = 0; i < fileList.length; i++) {
     const file = fileList[i];
+    if (isIgnoredSystemFile(file.name)) continue;
     const relativePath = file.webkitRelativePath || file.name;
     results.push({
       file,

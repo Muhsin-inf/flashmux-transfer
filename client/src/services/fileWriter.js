@@ -79,6 +79,24 @@ export async function computeFileMD5(file) {
 }
 
 /**
+ * Sanitizes restricted Windows/Office filenames so Chromium File System Access API
+ * does not reject getFileHandle with 'Name is not allowed'.
+ */
+export function sanitizeFileNameForDisk(fileName) {
+  if (!fileName) return 'unnamed_file';
+  let clean = fileName.trim();
+  const lower = clean.toLowerCase();
+  if (lower === 'desktop.ini' || lower === 'thumbs.db' || lower === '.ds_store') {
+    clean = `_safe_${clean}.txt`;
+  } else if (lower.endsWith('.lnk')) {
+    clean = clean.replace(/\.lnk$/i, '.shortcut_file');
+  } else if (clean.startsWith('~$')) {
+    clean = clean.replace(/^~\$/, '_temp_');
+  }
+  return clean;
+}
+
+/**
  * BatchFileWriter coordinates writing multiple files and folders directly to disk
  * or buffering files one-by-one for mobile fallback to ensure minimal RAM usage.
  */
@@ -90,6 +108,8 @@ export class BatchFileWriter {
     this.currentFile = null;
     this.currentFileHandle = null;
     this.currentStream = null;
+    this.currentHasher = null;
+    this.writePromiseChain = Promise.resolve();
     this.currentChunksMap = new Map();
     this.isClosed = false;
     this.completedFiles = [];
@@ -99,15 +119,35 @@ export class BatchFileWriter {
     this.currentFile = fileMeta;
     this.currentFileHandle = null;
     this.currentChunksMap.clear();
+    this.currentHasher = createIncrementalHasher();
+    this.writePromiseChain = Promise.resolve();
 
     const chunkSize = fileMeta.chunkSize || DEFAULT_CHUNK_SIZE;
     this.currentChunkSize = chunkSize;
+
+    // Handle empty directory creation
+    if (fileMeta.isDirectory) {
+      if (this.directoryHandle) {
+        try {
+          const pathSegments = (fileMeta.relativePath || fileMeta.fileName).split('/').filter(Boolean);
+          let dir = this.directoryHandle;
+          for (const segment of pathSegments) {
+            dir = await dir.getDirectoryHandle(segment, { create: true });
+          }
+          console.log(`[BatchFileWriter] Directory created: ${fileMeta.relativePath}`);
+        } catch (err) {
+          console.warn(`[BatchFileWriter] Failed to create directory ${fileMeta.relativePath}:`, err.message);
+        }
+      }
+      return;
+    }
 
     // Strategy 1: User provided a Directory Handle (Folder or multi-file on Desktop)
     if (this.directoryHandle) {
       try {
         const pathSegments = (fileMeta.relativePath || fileMeta.fileName).split('/').filter(Boolean);
-        const fileName = pathSegments.pop();
+        const rawFileName = pathSegments.pop() || fileMeta.fileName || 'file';
+        const fileName = sanitizeFileNameForDisk(rawFileName);
 
         let dir = this.directoryHandle;
         for (const segment of pathSegments) {
@@ -117,7 +157,7 @@ export class BatchFileWriter {
         const fileHandle = await dir.getFileHandle(fileName, { create: true });
         this.currentFileHandle = fileHandle;
         this.currentStream = await fileHandle.createWritable();
-        console.log(`[BatchFileWriter] Direct stream opened for: ${fileMeta.relativePath}`);
+        console.log(`[BatchFileWriter] Direct stream opened for: ${fileMeta.relativePath || fileName}`);
         return;
       } catch (err) {
         console.warn(`[BatchFileWriter] Failed to open stream for ${fileMeta.relativePath}, falling back:`, err.message);
@@ -147,13 +187,26 @@ export class BatchFileWriter {
   async writeChunk(chunkIndex, payloadBuffer) {
     if (this.isClosed) return;
 
+    if (this.currentHasher) {
+      this.currentHasher.append(payloadBuffer);
+    }
+
     if (this.currentStream) {
-      const position = chunkIndex * this.currentChunkSize;
-      await this.currentStream.write({
-        type: 'write',
-        position,
-        data: payloadBuffer,
+      // Enqueue sequential write promise to avoid concurrent stream write collisions
+      this.writePromiseChain = this.writePromiseChain.then(async () => {
+        if (this.isClosed || !this.currentStream) return;
+        try {
+          const position = chunkIndex * this.currentChunkSize;
+          await this.currentStream.write({
+            type: 'write',
+            position,
+            data: payloadBuffer,
+          });
+        } catch (err) {
+          console.warn(`[BatchFileWriter] Write chunk ${chunkIndex} error:`, err.message);
+        }
       });
+      return this.writePromiseChain;
     } else {
       this.currentChunksMap.set(chunkIndex, payloadBuffer);
     }
@@ -163,41 +216,51 @@ export class BatchFileWriter {
     if (!this.currentFile) return null;
 
     const fileMeta = this.currentFile;
+
+    // Handle directory entry
+    if (fileMeta.isDirectory) {
+      const result = {
+        fileIndex: fileMeta.fileIndex,
+        fileName: fileMeta.fileName,
+        relativePath: fileMeta.relativePath,
+        savedDirectly: Boolean(this.directoryHandle),
+        isDirectory: true,
+        localHash: '',
+      };
+      this.completedFiles.push(result);
+      this.currentFile = null;
+      return result;
+    }
+
     let savedDirectly = false;
     let localHash = '';
 
     if (this.currentStream) {
       try {
+        // 1. Wait for all queued writes to finish flushing to disk
+        await this.writePromiseChain;
+        // 2. Safely close stream
         await this.currentStream.close();
         savedDirectly = true;
-
-        if (this.currentFileHandle) {
-          try {
-            const diskFile = await this.currentFileHandle.getFile();
-            localHash = await computeFileMD5(diskFile);
-          } catch (e) {
-            console.warn('[BatchFileWriter] Readback hash check error:', e);
-          }
-        }
       } catch (err) {
         console.error(`[BatchFileWriter] Error closing stream for ${fileMeta.fileName}:`, err);
       }
       this.currentStream = null;
+      // Get hash calculated on the fly during chunk writes (0ms disk I/O!)
+      localHash = this.currentHasher ? this.currentHasher.finalize() : '';
     } else {
       // Assemble and trigger auto-download in fallback mode
       const totalChunks = fileMeta.totalChunks || this.currentChunksMap.size;
       const sortedChunks = [];
-      const hasher = createIncrementalHasher();
 
       for (let i = 0; i < totalChunks; i++) {
         const chunk = this.currentChunksMap.get(i);
         if (chunk) {
           sortedChunks.push(chunk);
-          hasher.append(chunk);
         }
       }
 
-      localHash = hasher.finalize();
+      localHash = this.currentHasher ? this.currentHasher.finalize() : '';
 
       const blob = new Blob(sortedChunks, { type: fileMeta.fileType || 'application/octet-stream' });
       this.currentChunksMap.clear();
@@ -205,8 +268,8 @@ export class BatchFileWriter {
       const downloadUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = downloadUrl;
-      // Sanitize relative path for fallback download filename
-      a.download = (fileMeta.relativePath || fileMeta.fileName).replace(/\//g, '_');
+      const sanitizedName = sanitizeFileNameForDisk(fileMeta.fileName || 'download');
+      a.download = (fileMeta.relativePath || sanitizedName).replace(/\//g, '_');
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -226,6 +289,7 @@ export class BatchFileWriter {
     this.completedFiles.push(result);
     this.currentFile = null;
     this.currentFileHandle = null;
+    this.currentHasher = null;
     return result;
   }
 

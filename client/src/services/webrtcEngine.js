@@ -7,8 +7,8 @@ const MAX_BUFFER_AMOUNT = 1024 * 1024; // 1 MB backpressure ceiling
 const LOW_BUFFER_THRESHOLD = 256 * 1024; // 256 KB threshold for bufferedamountlow
 
 /**
- * P2PTransferEngine manages WebRTC PeerConnection, 4x parallel DataChannels,
- * IDM-style independent segment partitioning with work-stealing, and batch telemetry.
+ * P2PTransferEngine manages WebRTC PeerConnection, reliable single-channel DataChannel streaming,
+ * backpressure flow control, and batch telemetry.
  */
 export class P2PTransferEngine {
   constructor({
@@ -34,17 +34,15 @@ export class P2PTransferEngine {
     this.onError = onError;
     this.fileWriter = fileWriter;
 
-    this.numChannels = 4;
+    this.numChannels = 1;
     this.channels = [];
     this.pendingCandidates = [];
+    this.ackListeners = new Map();
     this.isClosed = false;
 
-    // Multi-channel telemetry with independent segment tracking
+    // Stream telemetry
     this.channelStats = [
-      { id: 0, chunks: 0, bytes: 0, active: false, rangeLabel: 'Part 1 (0% - 25%)', progressPercent: 0 },
-      { id: 1, chunks: 0, bytes: 0, active: false, rangeLabel: 'Part 2 (25% - 50%)', progressPercent: 0 },
-      { id: 2, chunks: 0, bytes: 0, active: false, rangeLabel: 'Part 3 (50% - 75%)', progressPercent: 0 },
-      { id: 3, chunks: 0, bytes: 0, active: false, rangeLabel: 'Part 4 (75% - 100%)', progressPercent: 0 },
+      { id: 0, chunks: 0, bytes: 0, active: false, rangeLabel: 'P2P Direct Stream', progressPercent: 0 },
     ];
 
     // LAN host ICE candidates
@@ -77,46 +75,49 @@ export class P2PTransferEngine {
   async initAsSender(batchMetadata, stagedFiles) {
     this.role = 'sender';
     this.batchMetadata = batchMetadata;
-    this.stagedFiles = stagedFiles; // Array of { file, relativePath, size, type }
+    this.stagedFiles = stagedFiles; // Array of { file, relativePath, size, type, isDirectory }
     this.totalFiles = stagedFiles.length;
     this.batchTotalBytes = batchMetadata.totalBytes || 0;
 
     this.currentFileIndex = 0;
     this.totalBytesTransferred = 0;
-    this.openChannelsCount = 0;
     this.startTime = Date.now();
     this.lastProgressTime = Date.now();
     this.lastProgressBytes = 0;
 
-    // Open 4 parallel DataChannels
-    for (let i = 0; i < this.numChannels; i++) {
-      const channelId = i;
-      const dc = this.pc.createDataChannel(`transfer_channel_${channelId}`, {
-        ordered: true,
-      });
-      dc.binaryType = 'arraybuffer';
-      dc.bufferedAmountLowThreshold = LOW_BUFFER_THRESHOLD;
+    // Single reliable ordered DataChannel
+    const dc = this.pc.createDataChannel('transfer_channel_0', {
+      ordered: true,
+    });
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = LOW_BUFFER_THRESHOLD;
 
-      dc.onopen = () => {
-        console.log(`[WebRTCEngine] Channel ${channelId} open to ${this.targetPeerId}`);
-        this.channelStats[channelId].active = true;
-        this.openChannelsCount += 1;
-        if (this.openChannelsCount === this.numChannels) {
-          console.log('[WebRTCEngine] All 4 channels ready. Starting segmented streaming.');
-          this.startBatchStreaming();
+    dc.onopen = () => {
+      console.log(`[WebRTCEngine] Transfer channel open to ${this.targetPeerId}`);
+      this.channelStats[0].active = true;
+      this.startBatchStreaming();
+    };
+
+    dc.onclose = () => {
+      this.channelStats[0].active = false;
+    };
+
+    dc.onerror = (err) => {
+      console.error('[WebRTCEngine] Sender channel error:', err);
+    };
+
+    dc.onmessage = (msgEvent) => {
+      if (typeof msgEvent.data === 'string') {
+        try {
+          const control = JSON.parse(msgEvent.data);
+          this.handleSenderControl(control);
+        } catch (err) {
+          console.warn('[WebRTCEngine] Sender control parse error:', err);
         }
-      };
+      }
+    };
 
-      dc.onclose = () => {
-        this.channelStats[channelId].active = false;
-      };
-
-      dc.onerror = (err) => {
-        console.error(`[WebRTCEngine] Channel ${channelId} error:`, err);
-      };
-
-      this.channels.push(dc);
-    }
+    this.channels = [dc];
 
     // Dispatch SDP offer
     const offer = await this.pc.createOffer();
@@ -130,6 +131,33 @@ export class P2PTransferEngine {
     });
   }
 
+  handleSenderControl(control) {
+    if (control.type === 'FILE_END_ACK') {
+      const key = `FILE_END_ACK_${control.fileIndex}`;
+      const listener = this.ackListeners.get(key);
+      if (listener) listener();
+    } else if (control.type === 'BATCH_COMPLETE_ACK') {
+      const listener = this.ackListeners.get('BATCH_COMPLETE_ACK');
+      if (listener) listener();
+    }
+  }
+
+  waitForAck(ackType, fileIndex, timeoutMs = 6000) {
+    return new Promise((resolve) => {
+      const key = fileIndex >= 0 ? `${ackType}_${fileIndex}` : ackType;
+      const timer = setTimeout(() => {
+        this.ackListeners.delete(key);
+        resolve(false);
+      }, timeoutMs);
+
+      this.ackListeners.set(key, () => {
+        clearTimeout(timer);
+        this.ackListeners.delete(key);
+        resolve(true);
+      });
+    });
+  }
+
   async startBatchStreaming() {
     this.startTime = Date.now();
 
@@ -139,28 +167,28 @@ export class P2PTransferEngine {
       const staged = this.stagedFiles[i];
       const fileMeta = this.batchMetadata.files[i];
 
-      console.log(`[WebRTCEngine] Streaming file ${i + 1}/${this.totalFiles}: ${fileMeta.relativePath}`);
+      console.log(`[WebRTCEngine] Streaming item ${i + 1}/${this.totalFiles}: ${fileMeta.relativePath}`);
 
-      // Reset per-file channel stats
-      this.channelStats.forEach((ch) => {
-        ch.chunks = 0;
-        ch.bytes = 0;
-        ch.progressPercent = 0;
-      });
+      // Reset per-file telemetry
+      this.channelStats[0].chunks = 0;
+      this.channelStats[0].bytes = 0;
+      this.channelStats[0].progressPercent = 0;
 
       if (this.onFileStart) {
         this.onFileStart(fileMeta, i, this.totalFiles);
       }
 
-      // Notify receiver of next file
+      // Notify receiver of next file or directory
       this.broadcastControlMessage({
         type: 'FILE_START',
         fileIndex: i,
         metadata: fileMeta,
       });
 
-      // Stream current file with IDM-style independent segments
-      const fileHash = await this.streamSingleFile(staged.file, fileMeta);
+      let fileHash = '';
+      if (!fileMeta.isDirectory && staged?.file) {
+        fileHash = await this.streamSingleFile(staged.file, fileMeta);
+      }
 
       // Notify receiver of file completion
       this.broadcastControlMessage({
@@ -168,6 +196,9 @@ export class P2PTransferEngine {
         fileIndex: i,
         fileHash,
       });
+
+      // Synchronize: Wait for receiver to finish writing & closing file before streaming next
+      await this.waitForAck('FILE_END_ACK', i, 6000);
 
       if (this.onFileComplete) {
         this.onFileComplete({
@@ -192,6 +223,8 @@ export class P2PTransferEngine {
         averageSpeed,
       });
 
+      await this.waitForAck('BATCH_COMPLETE_ACK', -1, 4000);
+
       if (this.onComplete) {
         this.onComplete({
           role: 'sender',
@@ -208,151 +241,68 @@ export class P2PTransferEngine {
     const raw = JSON.stringify(msgObj);
     const openChannel = this.channels.find((ch) => ch.readyState === 'open');
     if (openChannel) {
-      openChannel.send(raw);
+      try {
+        openChannel.send(raw);
+      } catch (err) {
+        console.warn('[WebRTCEngine] Send control error:', err.message);
+      }
     }
   }
 
   /**
-   * Streams a single file using 4 independent segments (IDM-style) with work-stealing
+   * Streams a single file sequentially over the high-speed data channel with backpressure
    */
   async streamSingleFile(file, fileMeta) {
     const totalChunks = calculateTotalChunks(file.size, CHUNK_SIZE);
     let fileSentBytes = 0;
+    const dc = this.channels[0];
+    if (!dc || dc.readyState !== 'open') return '';
 
     // Fast asynchronous pre-calculation of file MD5 hash
     const hashPromise = computeFileMD5(file);
 
-    const activeChannels = this.channels.filter((ch) => ch.readyState === 'open');
-    const numChannels = Math.min(activeChannels.length || 4, Math.max(1, totalChunks));
+    for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+      if (this.isClosed || dc.readyState !== 'open') break;
 
-    // Partition totalChunks into independent segments for each channel
-    const chunksPerChannel = Math.ceil(totalChunks / numChannels);
-    const segments = [];
-
-    for (let i = 0; i < numChannels; i++) {
-      const start = i * chunksPerChannel;
-      const end = Math.min(start + chunksPerChannel, totalChunks);
-      if (start < totalChunks) {
-        const segTotal = end - start;
-        const startPct = Math.round((start / totalChunks) * 100);
-        const endPct = Math.round((end / totalChunks) * 100);
-
-        segments.push({
-          channelId: i,
-          startChunk: start,
-          endChunk: end,
-          currentChunk: start,
-          totalChunks: segTotal,
-          rangeLabel: `Part ${i + 1} (${startPct}% - ${endPct}%)`,
-          sentChunks: 0,
+      // Backpressure ceiling: wait if network buffer is saturated
+      if (dc.bufferedAmount > MAX_BUFFER_AMOUNT) {
+        await new Promise((resolve) => {
+          dc.onbufferedamountlow = () => {
+            dc.onbufferedamountlow = null;
+            resolve();
+          };
         });
       }
+
+      if (this.isClosed) break;
+
+      const chunkBuffer = await readChunkSlice(file, chunkIdx, CHUNK_SIZE);
+      const packet = encodeChunkPacket(chunkIdx, 0, chunkBuffer);
+
+      try {
+        dc.send(packet);
+      } catch (err) {
+        console.error('[WebRTCEngine] Send chunk error:', err);
+        break;
+      }
+
+      fileSentBytes += chunkBuffer.byteLength;
+      this.totalBytesTransferred += chunkBuffer.byteLength;
+
+      this.channelStats[0].chunks += 1;
+      this.channelStats[0].bytes += chunkBuffer.byteLength;
+      this.channelStats[0].progressPercent = totalChunks > 0
+        ? Math.min(100, (this.channelStats[0].chunks / totalChunks) * 100)
+        : 100;
+
+      this.emitProgress({
+        fileBytes: fileSentBytes,
+        fileTotalBytes: file.size,
+        currentChunks: chunkIdx + 1,
+        totalChunks,
+        fileMeta,
+      });
     }
-
-    // Set initial ranges in channel stats
-    segments.forEach((seg) => {
-      this.channelStats[seg.channelId].rangeLabel = seg.rangeLabel;
-    });
-
-    const channelPump = async (dc, channelId) => {
-      const seg = segments.find((s) => s.channelId === channelId);
-      if (!seg) return;
-
-      // 1. Pump dedicated segment independently without lockstep with other channels
-      while (seg.currentChunk < seg.endChunk && dc.readyState === 'open' && !this.isClosed) {
-        if (dc.bufferedAmount > MAX_BUFFER_AMOUNT) {
-          await new Promise((resolve) => {
-            dc.onbufferedamountlow = () => {
-              dc.onbufferedamountlow = null;
-              resolve();
-            };
-          });
-        }
-
-        if (seg.currentChunk >= seg.endChunk || this.isClosed) break;
-
-        const chunkIdx = seg.currentChunk;
-        seg.currentChunk += 1;
-        seg.sentChunks += 1;
-
-        const payloadBuffer = await readChunkSlice(file, chunkIdx, CHUNK_SIZE);
-        const packet = encodeChunkPacket(chunkIdx, channelId, payloadBuffer);
-
-        try {
-          dc.send(packet);
-        } catch (err) {
-          console.error(`[WebRTCEngine] Send error on ch ${channelId}:`, err);
-          break;
-        }
-
-        fileSentBytes += payloadBuffer.byteLength;
-        this.totalBytesTransferred += payloadBuffer.byteLength;
-
-        this.channelStats[channelId].chunks += 1;
-        this.channelStats[channelId].bytes += payloadBuffer.byteLength;
-        this.channelStats[channelId].progressPercent = seg.totalChunks > 0
-          ? Math.min(100, (seg.sentChunks / seg.totalChunks) * 100)
-          : 100;
-
-        this.emitProgress({
-          fileBytes: fileSentBytes,
-          fileTotalBytes: file.size,
-          currentChunks: this.channelStats.reduce((acc, c) => acc + c.chunks, 0),
-          totalChunks,
-          fileMeta,
-        });
-      }
-
-      // 2. Work-Stealing: If this channel finished its segment early, help the busiest remaining segment
-      while (!this.isClosed && dc.readyState === 'open') {
-        const busySegments = segments.filter(
-          (s) => s.endChunk - s.currentChunk > 2 && s.channelId !== channelId
-        );
-        if (busySegments.length === 0) break;
-
-        busySegments.sort((a, b) => (b.endChunk - b.currentChunk) - (a.endChunk - a.currentChunk));
-        const victim = busySegments[0];
-
-        // Steal from the end of victim's segment
-        victim.endChunk -= 1;
-        const stolenChunk = victim.endChunk;
-        if (stolenChunk < victim.currentChunk) break;
-
-        if (dc.bufferedAmount > MAX_BUFFER_AMOUNT) {
-          await new Promise((resolve) => {
-            dc.onbufferedamountlow = () => {
-              dc.onbufferedamountlow = null;
-              resolve();
-            };
-          });
-        }
-
-        const payloadBuffer = await readChunkSlice(file, stolenChunk, CHUNK_SIZE);
-        const packet = encodeChunkPacket(stolenChunk, channelId, payloadBuffer);
-        try {
-          dc.send(packet);
-        } catch {
-          break;
-        }
-
-        fileSentBytes += payloadBuffer.byteLength;
-        this.totalBytesTransferred += payloadBuffer.byteLength;
-
-        this.channelStats[channelId].chunks += 1;
-        this.channelStats[channelId].bytes += payloadBuffer.byteLength;
-
-        this.emitProgress({
-          fileBytes: fileSentBytes,
-          fileTotalBytes: file.size,
-          currentChunks: this.channelStats.reduce((acc, c) => acc + c.chunks, 0),
-          totalChunks,
-          fileMeta,
-        });
-      }
-    };
-
-    // Run all 4 channel pumps concurrently
-    await Promise.all(this.channels.map((dc, i) => channelPump(dc, i)));
 
     const fileHash = await hashPromise;
     return fileHash;
@@ -380,12 +330,11 @@ export class P2PTransferEngine {
     this.pc.ondatachannel = (event) => {
       const dc = event.channel;
       dc.binaryType = 'arraybuffer';
-      const channelId = this.channels.length;
-      this.channels.push(dc);
-      this.channelStats[channelId].active = true;
+      this.channels = [dc];
+      this.channelStats[0].active = true;
 
       dc.onopen = () => {
-        console.log(`[WebRTCEngine] Receiver channel ${channelId} open`);
+        console.log('[WebRTCEngine] Receiver channel open');
       };
 
       dc.onmessage = async (msgEvent) => {
@@ -401,38 +350,41 @@ export class P2PTransferEngine {
         }
 
         // Binary chunk packet
-        const { chunkIndex, channelId: packetChannelId, payloadSize, payload } = decodeChunkPacket(msgEvent.data);
+        try {
+          const { chunkIndex, payloadSize, payload } = decodeChunkPacket(msgEvent.data);
 
-        if (this.fileWriter) {
-          await this.fileWriter.writeChunk(chunkIndex, payload);
+          if (this.fileWriter) {
+            await this.fileWriter.writeChunk(chunkIndex, payload);
+          }
+
+          this.currentFileReceivedChunks += 1;
+          this.currentFileReceivedBytes += payloadSize;
+          this.totalBytesTransferred += payloadSize;
+
+          this.channelStats[0].chunks += 1;
+          this.channelStats[0].bytes += payloadSize;
+
+          const totalChunks = this.currentFileMeta?.totalChunks || 1;
+          this.channelStats[0].progressPercent = Math.min(100, (this.channelStats[0].chunks / totalChunks) * 100);
+
+          this.emitProgress({
+            fileBytes: this.currentFileReceivedBytes,
+            fileTotalBytes: this.currentFileMeta?.fileSize || 0,
+            currentChunks: this.currentFileReceivedChunks,
+            totalChunks,
+            fileMeta: this.currentFileMeta,
+          });
+        } catch (err) {
+          console.error('[WebRTCEngine] Receiver write error:', err);
         }
-
-        this.currentFileReceivedChunks += 1;
-        this.currentFileReceivedBytes += payloadSize;
-        this.totalBytesTransferred += payloadSize;
-
-        const activeChanId = packetChannelId < 4 ? packetChannelId : channelId;
-        this.channelStats[activeChanId].chunks += 1;
-        this.channelStats[activeChanId].bytes += payloadSize;
-
-        const totalChunks = this.currentFileMeta?.totalChunks || 1;
-        this.channelStats[activeChanId].progressPercent = Math.min(100, (this.channelStats[activeChanId].chunks / (totalChunks / 4)) * 100);
-
-        this.emitProgress({
-          fileBytes: this.currentFileReceivedBytes,
-          fileTotalBytes: this.currentFileMeta?.fileSize || 0,
-          currentChunks: this.currentFileReceivedChunks,
-          totalChunks,
-          fileMeta: this.currentFileMeta,
-        });
       };
 
       dc.onclose = () => {
-        this.channelStats[channelId].active = false;
+        this.channelStats[0].active = false;
       };
 
       dc.onerror = (err) => {
-        console.error(`[WebRTCEngine] Receiver channel ${channelId} error:`, err);
+        console.error('[WebRTCEngine] Receiver channel error:', err);
       };
     };
   }
@@ -445,12 +397,9 @@ export class P2PTransferEngine {
         this.currentFileReceivedChunks = 0;
         this.currentFileReceivedBytes = 0;
 
-        this.channelStats.forEach((ch, idx) => {
-          ch.chunks = 0;
-          ch.bytes = 0;
-          ch.progressPercent = 0;
-          ch.rangeLabel = `Part ${idx + 1} (${idx * 25}% - ${(idx + 1) * 25}%)`;
-        });
+        this.channelStats[0].chunks = 0;
+        this.channelStats[0].bytes = 0;
+        this.channelStats[0].progressPercent = 0;
 
         if (this.fileWriter) {
           await this.fileWriter.startFile(control.metadata);
@@ -484,6 +433,12 @@ export class P2PTransferEngine {
 
         this.completedFiles.push(completedInfo);
 
+        // Send ACK back to sender to guarantee sequential file progression
+        this.broadcastControlMessage({
+          type: 'FILE_END_ACK',
+          fileIndex: control.fileIndex,
+        });
+
         if (this.onFileComplete) {
           this.onFileComplete(completedInfo);
         }
@@ -495,6 +450,11 @@ export class P2PTransferEngine {
         if (this.fileWriter) {
           batchResult = await this.fileWriter.finishBatch();
         }
+
+        // Send ACK back to sender
+        this.broadcastControlMessage({
+          type: 'BATCH_COMPLETE_ACK',
+        });
 
         const totalDurationSeconds = Math.max(0.1, (Date.now() - this.startTime) / 1000);
         const averageSpeed = this.totalBytesTransferred / totalDurationSeconds;

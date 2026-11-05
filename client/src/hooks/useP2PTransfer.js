@@ -100,11 +100,16 @@ export function useP2PTransfer() {
                 setTransferState((prev) => ({ ...prev, currentFile: fileMeta }));
               },
               onProgress: (prog) => {
-                setTransferState((prev) => ({
-                  ...prev,
-                  status: 'transferring',
-                  progress: prog,
-                }));
+                setTransferState((prev) => {
+                  if (prev.status === 'completed' || prev.status === 'error' || prev.status === 'cancelled') {
+                    return prev;
+                  }
+                  return {
+                    ...prev,
+                    status: 'transferring',
+                    progress: prog,
+                  };
+                });
               },
               onChannelProgress: (chans) => {
                 setTransferState((prev) => ({ ...prev, channels: chans }));
@@ -199,15 +204,18 @@ export function useP2PTransfer() {
 
     let totalBytes = 0;
     const fileManifest = stagedFiles.map((item, index) => {
-      totalBytes += item.size;
+      totalBytes += item.size || 0;
+      const isDir = Boolean(item.isDirectory);
+      const fileName = item.file ? item.file.name : (item.fileName || (item.relativePath || '').replace(/\/$/, '').split('/').pop() || 'folder');
       return {
         fileIndex: index,
-        fileName: item.file.name,
-        relativePath: item.relativePath || item.file.name,
-        fileSize: item.size,
-        fileType: item.type || 'application/octet-stream',
+        fileName,
+        relativePath: item.relativePath || fileName,
+        fileSize: item.size || 0,
+        fileType: item.type || (isDir ? 'directory' : 'application/octet-stream'),
+        isDirectory: isDir,
         chunkSize: DEFAULT_CHUNK_SIZE,
-        totalChunks: calculateTotalChunks(item.size, DEFAULT_CHUNK_SIZE),
+        totalChunks: isDir ? 0 : calculateTotalChunks(item.size || 0, DEFAULT_CHUNK_SIZE),
       };
     });
 
@@ -242,10 +250,7 @@ export function useP2PTransfer() {
         etaSeconds: 0,
       },
       channels: [
-        { id: 0, chunks: 0, bytes: 0, active: false },
-        { id: 1, chunks: 0, bytes: 0, active: false },
-        { id: 2, chunks: 0, bytes: 0, active: false },
-        { id: 3, chunks: 0, bytes: 0, active: false },
+        { id: 0, chunks: 0, bytes: 0, active: false, rangeLabel: 'P2P Direct Stream', progressPercent: 0 },
       ],
       completedFiles: [],
       result: null,
@@ -301,10 +306,7 @@ export function useP2PTransfer() {
         etaSeconds: 0,
       },
       channels: [
-        { id: 0, chunks: 0, bytes: 0, active: false },
-        { id: 1, chunks: 0, bytes: 0, active: false },
-        { id: 2, chunks: 0, bytes: 0, active: false },
-        { id: 3, chunks: 0, bytes: 0, active: false },
+        { id: 0, chunks: 0, bytes: 0, active: false, rangeLabel: 'P2P Direct Stream', progressPercent: 0 },
       ],
       completedFiles: [],
       result: null,
@@ -320,11 +322,16 @@ export function useP2PTransfer() {
         setTransferState((prev) => ({ ...prev, currentFile: fileMeta }));
       },
       onProgress: (prog) => {
-        setTransferState((prev) => ({
-          ...prev,
-          status: 'transferring',
-          progress: prog,
-        }));
+        setTransferState((prev) => {
+          if (prev.status === 'completed' || prev.status === 'error' || prev.status === 'cancelled') {
+            return prev;
+          }
+          return {
+            ...prev,
+            status: 'transferring',
+            progress: prog,
+          };
+        });
       },
       onChannelProgress: (chans) => {
         setTransferState((prev) => ({ ...prev, channels: chans }));

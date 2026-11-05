@@ -63,7 +63,7 @@ export default function TransferProgress({
 
         <div className="status-badge-wrap">
           {isConnecting && <span className="badge badge-warning">Negotiating WebRTC</span>}
-          {isTransferring && <span className="badge badge-active">Streaming 4x (IDM Segments)</span>}
+          {isTransferring && <span className="badge badge-active">Streaming (P2P Direct)</span>}
           {isCompleted && <span className="badge badge-success">Batch Complete</span>}
           {isFailed && <span className="badge badge-danger">Failed / Cancelled</span>}
         </div>
@@ -150,10 +150,10 @@ export default function TransferProgress({
         </div>
       </div>
 
-      {/* 4-Channel Independent Segments (IDM-Style) */}
+      {/* P2P Stream Pipeline */}
       <div className="channels-section">
         <div className="channels-header">
-          <span className="section-label">IDM-Style Parallel Segment Distribution</span>
+          <span className="section-label">P2P Direct Stream Pipeline</span>
           <span className="section-meta">
             {progress.currentChunks} / {progress.totalChunks} Chunks (Current File)
           </span>
