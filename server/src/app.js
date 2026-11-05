@@ -6,14 +6,25 @@ import { PORT, CORS_ORIGIN } from './config/env.js';
 import { getLocalIPv4 } from './utils/networkUtils.js';
 import { signalingController } from './controllers/signalingController.js';
 import apiRoutes from './routes/apiRoutes.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const app = express();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const clientDist = path.resolve(__dirname, '../../client/dist');
 
 app.use(cors({ origin: CORS_ORIGIN }));
 app.use(express.json());
 
 // API routes
 app.use('/api', apiRoutes);
+
+// Serve production frontend from same origin.
+app.use(express.static(clientDist));
+app.get('*', (req, res, next) => {
+  if (req.path === '/' || req.path.startsWith('/api')) return next();
+  res.sendFile(path.join(clientDist, 'index.html'));
+});
 
 // Root informational endpoint
 app.get('/', (req, res) => {

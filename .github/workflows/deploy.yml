@@ -1,0 +1,36 @@
+name: Deploy FlashMux
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: flashmux-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy on server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -eu
+            APP_DIR="${{ secrets.DEPLOY_PATH }}"
+            mkdir -p "$APP_DIR"
+            if [ -d "$APP_DIR/.git" ]; then
+              git -C "$APP_DIR" fetch origin main
+              git -C "$APP_DIR" reset --hard origin/main
+            else
+              git clone --branch main --depth 1 https://github.com/Muhsin-inf/flashmux-transfer.git "$APP_DIR"
+            fi
+            cd "$APP_DIR"
+            docker compose up -d --build --remove-orphans
+            docker image prune -f
+            curl --fail --silent --show-error http://127.0.0.1:8088/api/health

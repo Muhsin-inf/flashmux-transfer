@@ -32,6 +32,11 @@ export class SignalingClient {
       return `wss://${host}/ws`;
     }
 
+    // Production serves frontend and WebSocket from same origin.
+    if (typeof window !== 'undefined' && window.location.port !== '5173') {
+      return `${isHttps ? 'wss' : 'ws'}://${host}/ws`;
+    }
+
     return `ws://${hostname}:${defaultPort}`;
   }
 

@@ -1,0 +1,10 @@
+services:
+  flashmux:
+    build: .
+    container_name: flashmux
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      CORS_ORIGIN: "*"
+    ports:
+      - "8088:3000"

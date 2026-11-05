@@ -11,5 +11,5 @@ export const CHUNK_SIZE = 16 * 1024;
 export const SIGNALING_SERVER_URL =
   import.meta.env.VITE_SIGNALING_SERVER_URL ||
   (typeof window !== 'undefined'
-    ? `ws://${window.location.hostname}:5000`
-    : 'ws://localhost:5000');
+    ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`
+    : 'ws://localhost:3000/ws');
